@@ -1,0 +1,13 @@
+{
+  "name": "te-hacks-bot",
+  "version": "1.0.0",
+  "description": "Te Hacks Discord destek botu - ticket, log ve invite sistemi",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.15.3"
+  }
+}
