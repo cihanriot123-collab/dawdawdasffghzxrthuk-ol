@@ -1,0 +1,27 @@
+{
+  "token": "",
+  "clientId": "",
+  "staffRoleNames": [
+    "Kurucu",
+    "Yönetici",
+    "Modaretor",
+    "Teknik Destek",
+    "Ticket Sorumlusu",
+    "Ticket King",
+    "yetkili ekibi"
+  ],
+  "ticketCategoryId": "",
+  "logChannelId": "",
+  "serverName": "Te Hacks",
+  "bannedWords": [
+    "amk",
+    "aq",
+    "orospu",
+    "piç",
+    "yavşak",
+    "siktir",
+    "göt",
+    "ibne",
+    "oç"
+  ]
+}
