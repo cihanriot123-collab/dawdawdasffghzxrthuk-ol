@@ -6,11 +6,12 @@
  *  - Ticket (destek talebi) sistemi -> /ticketkur
  *  - Ticket log sistemi (sarı tema) -> /ticketlog
  *  - Invite (davet) takip sistemi, gerçek/fake üye ayrımı -> /invites
- *  - "Hile Alım" / "Config Alım" ticketlarında seçenek menüsü
- *    (NOT: Bot herhangi bir dosya veya link göndermez. Kullanıcı bir
- *     seçenek seçtiğinde bot sadece "Yetkililer hemen ilgileniyor,
- *     ... hile/config" şeklinde bilgilendirme yazar, gerisini yetkililer
- *     ticket üzerinden manuel olarak halleder.)
+ *  - "Hile Alım" / "Config Alım" ticketlarında seçenek menüsü + davet şartı
+ *    (Config Alım: 2 davet, Hile Alım: 4 davet gerekir, seçim yapılınca
+ *     bakiyeden düşülür. NOT: Bot herhangi bir dosya veya link göndermez.
+ *     Kullanıcı bir seçenek seçtiğinde bot sadece "Yetkililer hemen
+ *     ilgileniyor, ... hile/config" şeklinde bilgilendirme yazar,
+ *     gerisini yetkililer ticket üzerinden manuel olarak halleder.)
  *  - /sesafk -> Botu, komutu yazan kişinin bulunduğu ses kanalına sokar
  *    ve orada sürekli (AFK) bekletir; bağlantı koparsa otomatik olarak
  *    tekrar katılır. SADECE SUNUCU KURUCUSU kullanabilir.
@@ -40,6 +41,7 @@ const {
 const fs = require('fs');
 const path = require('path');
 const config = require('./config.json');
+const mesajlar = require('./mesajlar.json');
 
 // Railway (veya başka bir hosting) kullanıyorsan token ve clientId'yi
 // "Variables" kısmından ortam değişkeni olarak verebilirsin. Yoksa
@@ -117,23 +119,28 @@ const TICKET_TYPES = {
   sorum_var: { label: 'Sorum Var', style: ButtonStyle.Primary, emoji: '❔', kategori: 'SORUM VAR' },
 };
 
-// Hile Alım seçenekleri
-const HILE_OPTIONS = [
-  { id: 'enesbatur', label: 'Enesbatur Hilesi', style: ButtonStyle.Danger },
-];
+// Hile Alım / Config Alım seçenekleri ve mesajları artık mesajlar.json içinden okunuyor
+const RENK_MAP = {
+  Primary: ButtonStyle.Primary,
+  Secondary: ButtonStyle.Secondary,
+  Success: ButtonStyle.Success,
+  Danger: ButtonStyle.Danger,
+};
 
-// Config Alım seçenekleri
-const CONFIG_OPTIONS = [
-  { id: 'catlean', label: 'Catlean Doomsday (Yakında)', style: ButtonStyle.Secondary, disabled: true },
-  { id: 'clanware', label: 'Clanware', style: ButtonStyle.Primary },
-  { id: 'enesbatur', label: 'Enesbatur', style: ButtonStyle.Success },
-];
+function mesajSecenekleriYukle(liste) {
+  return (liste || []).map((o) => ({
+    id: o.id,
+    label: o.label,
+    style: RENK_MAP[o.renk] || ButtonStyle.Secondary,
+    disabled: !!o.pasif,
+    mesaj: o.mesaj || '',
+    altMenuGoster: !!o.altMenuGoster,
+  }));
+}
 
-// Enesbatur config için seviye seçenekleri
-const ENESBATUR_LEVELS = [
-  { id: 'orta', label: 'Orta Seviye', style: ButtonStyle.Primary },
-  { id: 'yuksek', label: 'Yüksek Seviye', style: ButtonStyle.Danger },
-];
+const HILE_OPTIONS = mesajSecenekleriYukle(mesajlar.hileSecenekleri);
+const CONFIG_OPTIONS = mesajSecenekleriYukle(mesajlar.configSecenekleri);
+const ENESBATUR_LEVELS = mesajSecenekleriYukle(mesajlar.enesbaturSeviyeleri);
 
 const SARI_RENK = 0xF1C40F; // ticket log teması - sarı
 
@@ -254,12 +261,12 @@ async function createTicketChannel(guild, member, typeKey) {
   // Hile Alım / Config Alım ise ek seçenek menüsü gönder
   if (typeKey === 'hile_alim') {
     await channel.send({
-      content: `<@${member.id}> Hangi hileyi alıcaksınız?`,
+      content: `<@${member.id}> ${mesajlar.sorular.hileAlim}`,
       components: [buildOptionRow('hilesec', HILE_OPTIONS)],
     });
   } else if (typeKey === 'config_alim') {
     await channel.send({
-      content: `<@${member.id}> Hangi configi alıcaksınız?`,
+      content: `<@${member.id}> ${mesajlar.sorular.configAlim}`,
       components: [buildOptionRow('configsec', CONFIG_OPTIONS)],
     });
   }
@@ -326,6 +333,27 @@ async function closeTicket(channel, closerMember) {
 function isAccountOlderThan30Days(createdTimestamp) {
   const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
   return Date.now() - createdTimestamp > THIRTY_DAYS_MS;
+}
+
+// ------------------------------------------------------------------
+// DAVET BAKİYESİ (Hile Alım / Config Alım için davet şartı)
+// ------------------------------------------------------------------
+// Bakiye = gerçek (fake olmayan) davet sayısı - şimdiye kadar harcanan davet
+const HILE_DAVET_MALIYETI = 4;
+const CONFIG_DAVET_MALIYETI = 2;
+
+function getInviteBakiyesi(userId) {
+  const data = invitesData[userId];
+  if (!data) return 0;
+  const gercekSayisi = (data.invited || []).filter((i) => i.real).length;
+  const harcanan = data.harcanan || 0;
+  return gercekSayisi - harcanan;
+}
+
+function inviteHarca(userId, miktar) {
+  if (!invitesData[userId]) invitesData[userId] = { invited: [], harcanan: 0 };
+  invitesData[userId].harcanan = (invitesData[userId].harcanan || 0) + miktar;
+  saveJSON(INVITES_FILE, invitesData);
 }
 
 function normalizeText(text) {
@@ -555,6 +583,7 @@ client.on('interactionCreate', async (interaction) => {
         const data = invitesData[user.id] || { invited: [] };
         const gercek = data.invited.filter((i) => i.real);
         const fake = data.invited.filter((i) => !i.real);
+        const bakiye = getInviteBakiyesi(user.id);
 
         const embed = new EmbedBuilder()
           .setColor(SARI_RENK)
@@ -563,6 +592,7 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'Toplam Davet', value: `${data.invited.length}`, inline: true },
             { name: '✅ Gerçek Üye', value: `${gercek.length}`, inline: true },
             { name: '❌ Fake Üye', value: `${fake.length}`, inline: true },
+            { name: '💰 Kullanılabilir Bakiye', value: `${bakiye}`, inline: true },
             {
               name: '📋 Getirilen Kişiler',
               value:
@@ -642,44 +672,80 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // Hile Alım seçenekleri
+      // Hile Alım seçenekleri (4 davet gerektirir)
       if (id.startsWith('hilesec_')) {
         const optId = id.replace('hilesec_', '');
         const opt = HILE_OPTIONS.find((o) => o.id === optId);
         if (!opt) return;
+
+        const bakiye = getInviteBakiyesi(interaction.user.id);
+        if (bakiye < HILE_DAVET_MALIYETI) {
+          await interaction.reply({
+            content: `⚠️ Bu hile için **${HILE_DAVET_MALIYETI} davet** gerekiyor. Senin şu an **${bakiye}** davetin var.`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        inviteHarca(interaction.user.id, HILE_DAVET_MALIYETI);
+        const kalan = getInviteBakiyesi(interaction.user.id);
         await interaction.reply({
-          content: `Yetkililer hemen ilgileniyor, **${opt.label}**`,
+          content: `${opt.mesaj}\n\n📉 ${HILE_DAVET_MALIYETI} davet kullanıldı, kalan bakiye: **${kalan}**`,
         });
         return;
       }
 
-      // Config Alım seçenekleri
+      // Config Alım seçenekleri (2 davet gerektirir)
       if (id.startsWith('configsec_')) {
         const optId = id.replace('configsec_', '');
+        const opt = CONFIG_OPTIONS.find((o) => o.id === optId);
+        if (!opt || opt.disabled) return;
 
-        if (optId === 'enesbatur') {
+        if (opt.altMenuGoster) {
+          // Enesbatur -> alt menü (seviye seçimi), davet burada henüz düşülmez
           await interaction.reply({
-            content: 'Enesbatur configi için seviye seçin:',
+            content: mesajlar.sorular.enesbaturSeviye,
             components: [buildOptionRow('enesseviye', ENESBATUR_LEVELS)],
           });
           return;
         }
 
-        const opt = CONFIG_OPTIONS.find((o) => o.id === optId);
-        if (!opt || opt.disabled) return;
+        const bakiye = getInviteBakiyesi(interaction.user.id);
+        if (bakiye < CONFIG_DAVET_MALIYETI) {
+          await interaction.reply({
+            content: `⚠️ Bu config için **${CONFIG_DAVET_MALIYETI} davet** gerekiyor. Senin şu an **${bakiye}** davetin var.`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        inviteHarca(interaction.user.id, CONFIG_DAVET_MALIYETI);
+        const kalan = getInviteBakiyesi(interaction.user.id);
         await interaction.reply({
-          content: `Yetkililer hemen ilgileniyor, **${opt.label} config**`,
+          content: `${opt.mesaj}\n\n📉 ${CONFIG_DAVET_MALIYETI} davet kullanıldı, kalan bakiye: **${kalan}**`,
         });
         return;
       }
 
-      // Enesbatur seviye seçimi
+      // Enesbatur seviye seçimi (2 davet gerektirir)
       if (id.startsWith('enesseviye_')) {
         const levelId = id.replace('enesseviye_', '');
         const level = ENESBATUR_LEVELS.find((o) => o.id === levelId);
         if (!level) return;
+
+        const bakiye = getInviteBakiyesi(interaction.user.id);
+        if (bakiye < CONFIG_DAVET_MALIYETI) {
+          await interaction.reply({
+            content: `⚠️ Bu config için **${CONFIG_DAVET_MALIYETI} davet** gerekiyor. Senin şu an **${bakiye}** davetin var.`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        inviteHarca(interaction.user.id, CONFIG_DAVET_MALIYETI);
+        const kalan = getInviteBakiyesi(interaction.user.id);
         await interaction.reply({
-          content: `Yetkililer hemen ilgileniyor, **Enesbatur (${level.label}) config**`,
+          content: `${level.mesaj}\n\n📉 ${CONFIG_DAVET_MALIYETI} davet kullanıldı, kalan bakiye: **${kalan}**`,
         });
         return;
       }
