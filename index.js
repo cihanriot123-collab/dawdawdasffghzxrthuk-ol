@@ -11,6 +11,9 @@
  *     seçenek seçtiğinde bot sadece "Yetkililer hemen ilgileniyor,
  *     ... hile/config" şeklinde bilgilendirme yazar, gerisini yetkililer
  *     ticket üzerinden manuel olarak halleder.)
+ *  - /sesafk -> Botu, komutu yazan kişinin bulunduğu ses kanalına sokar
+ *    ve orada sürekli (AFK) bekletir; bağlantı koparsa otomatik olarak
+ *    tekrar katılır. SADECE SUNUCU KURUCUSU kullanabilir.
  */
 
 const {
@@ -28,6 +31,12 @@ const {
   SlashCommandBuilder,
   AttachmentBuilder,
 } = require('discord.js');
+const {
+  joinVoiceChannel,
+  getVoiceConnection,
+  VoiceConnectionStatus,
+  entersState,
+} = require('@discordjs/voice');
 const fs = require('fs');
 const path = require('path');
 const config = require('./config.json');
@@ -67,8 +76,8 @@ function saveJSON(file, data) {
 let invitesData = loadJSON(INVITES_FILE, {});
 // ticketsData: { counter: 0, active: { channelId: { type, openerId, openedAt } } }
 let ticketsData = loadJSON(TICKETS_FILE, { counter: 0, active: {} });
-// settings: { logChannelId: null }
-let settings = loadJSON(SETTINGS_FILE, { logChannelId: config.logChannelId || null });
+// settings: { logChannelId: null, sesAfk: { guildId, channelId } | null }
+let settings = loadJSON(SETTINGS_FILE, { logChannelId: config.logChannelId || null, sesAfk: null });
 
 // ------------------------------------------------------------------
 // CLIENT
@@ -80,6 +89,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildInvites,
+    GatewayIntentBits.GuildVoiceStates,
   ],
   partials: [Partials.Channel, Partials.Message],
 });
@@ -128,7 +138,7 @@ const ENESBATUR_LEVELS = [
 const SARI_RENK = 0xF1C40F; // ticket log teması - sarı
 
 // ------------------------------------------------------------------
-// YARDIMCI FONKSİYONLAR
+// YARDIMCI FONKSİYONLAR - TICKET
 // ------------------------------------------------------------------
 function buildTicketPanelRows() {
   const keys = Object.keys(TICKET_TYPES);
@@ -329,6 +339,68 @@ function normalizeText(text) {
 }
 
 // ------------------------------------------------------------------
+// SES AFK SİSTEMİ (/sesafk) - sadece sunucu kurucusu kullanabilir
+// ------------------------------------------------------------------
+// Botu belirtilen ses kanalına sokar ve orada sürekli kalmasını sağlar.
+// Bağlantı beklenmedik şekilde koparsa (kick, sunucu yeniden başlatma vb.)
+// otomatik olarak aynı kanala tekrar katılmaya çalışır.
+async function joinAfkChannel(guild, voiceChannel) {
+  const connection = joinVoiceChannel({
+    channelId: voiceChannel.id,
+    guildId: guild.id,
+    adapterCreator: guild.voiceAdapterCreator,
+    selfDeaf: true,
+    selfMute: true,
+  });
+
+  settings.sesAfk = { guildId: guild.id, channelId: voiceChannel.id };
+  saveJSON(SETTINGS_FILE, settings);
+
+  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+    try {
+      // Discord bazen kısa süreliğine "Disconnected" durumuna geçip
+      // kendiliğinden yeniden bağlanır (örn. bölge değişimi). Bu yüzden
+      // önce kısa bir süre normal yeniden bağlanmayı bekliyoruz.
+      await Promise.race([
+        entersState(connection, VoiceConnectionStatus.Signalling, 5000),
+        entersState(connection, VoiceConnectionStatus.Connecting, 5000),
+      ]);
+    } catch {
+      // Gerçekten koptu (örn. biri botu kanaldan attı) -> tekrar katıl
+      try {
+        connection.destroy();
+      } catch {
+        /* zaten kapanmış olabilir */
+      }
+      const stillSettings = settings.sesAfk;
+      if (!stillSettings) return;
+      const freshGuild = client.guilds.cache.get(stillSettings.guildId);
+      const freshChannel = freshGuild ? await freshGuild.channels.fetch(stillSettings.channelId).catch(() => null) : null;
+      if (freshGuild && freshChannel) {
+        setTimeout(() => joinAfkChannel(freshGuild, freshChannel), 2000);
+      }
+    }
+  });
+
+  connection.on('error', () => {
+    /* sessizce yoksay, Disconnected event zaten yeniden bağlanmayı tetikler */
+  });
+
+  return connection;
+}
+
+function leaveAfkChannelPermanently() {
+  // Not: /sesafk komutu bilerek bir "çıkış" komutu olarak tasarlanmadı
+  // (kullanıcı "asla çıkmayacak" istedi). Bu fonksiyon sadece bot yeniden
+  // başlatılırken ya da kurucu farklı bir kanala /sesafk komutunu tekrar
+  // çalıştırdığında eski bağlantıyı temizlemek için kullanılır.
+  if (mainGuildId) {
+    const existing = getVoiceConnection(mainGuildId);
+    if (existing) existing.destroy();
+  }
+}
+
+// ------------------------------------------------------------------
 // SLASH KOMUTLARI
 // ------------------------------------------------------------------
 const commands = [
@@ -347,6 +419,9 @@ const commands = [
     .setName('invites')
     .setDescription('Bir kullanıcının davet istatistiklerini gösterir.')
     .addUserOption((opt) => opt.setName('kullanici').setDescription('Kullanıcı').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('sesafk')
+    .setDescription('Botu bulunduğunuz ses kanalına AFK olarak sokar (sürekli kalır). Sadece sunucu kurucusu kullanabilir.'),
 ].map((c) => c.toJSON());
 
 async function registerCommands(guildId) {
@@ -388,6 +463,16 @@ client.once('ready', async () => {
     inviteCache.set(guild.id, new Map(invites.map((inv) => [inv.code, inv.uses])));
   } catch {
     inviteCache.set(guild.id, new Map());
+  }
+
+  // Bot yeniden başladıysa ve daha önce bir ses AFK kanalı ayarlanmışsa
+  // otomatik olarak o kanala tekrar katıl.
+  if (settings.sesAfk && settings.sesAfk.guildId === guild.id) {
+    const voiceChannel = await guild.channels.fetch(settings.sesAfk.channelId).catch(() => null);
+    if (voiceChannel) {
+      console.log(`🔊 Önceki ses AFK kanalına yeniden katılınıyor: ${voiceChannel.name}`);
+      await joinAfkChannel(guild, voiceChannel);
+    }
   }
 });
 
@@ -492,6 +577,36 @@ client.on('interactionCreate', async (interaction) => {
           .setTimestamp();
 
         await interaction.reply({ embeds: [embed] });
+      }
+
+      if (interaction.commandName === 'sesafk') {
+        // SADECE SUNUCU KURUCUSU kullanabilir
+        if (interaction.guild.ownerId !== interaction.user.id) {
+          await interaction.reply({
+            content: '⛔ Bu komutu sadece sunucu kurucusu kullanabilir.',
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const voiceChannel = interaction.member.voice?.channel;
+        if (!voiceChannel) {
+          await interaction.reply({
+            content: '⚠️ Bu komutu kullanabilmek için önce bir ses kanalına katılmalısın.',
+            ephemeral: true,
+          });
+          return;
+        }
+
+        await interaction.reply({ content: `🔊 <#${voiceChannel.id}> kanalına AFK olarak katılıyorum...`, ephemeral: true });
+
+        // Varsa önceki bağlantıyı temizle, sonra yeni kanala katıl
+        leaveAfkChannelPermanently();
+        await joinAfkChannel(interaction.guild, voiceChannel);
+
+        await interaction.editReply({
+          content: `✅ <#${voiceChannel.id}> kanalına katıldım ve burada sürekli kalacağım.`,
+        });
       }
       return;
     }
