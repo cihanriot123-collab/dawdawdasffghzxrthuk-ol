@@ -421,7 +421,7 @@ const commands = [
     .addUserOption((opt) => opt.setName('kullanici').setDescription('Kullanıcı').setRequired(true)),
   new SlashCommandBuilder()
     .setName('sesafk')
-    .setDescription('Botu bulunduğunuz ses kanalına AFK olarak sokar (sürekli kalır). Sadece sunucu kurucusu kullanabilir.'),
+    .setDescription('Botu ses kanalınıza AFK sokar, sürekli kalır (sadece kurucu kullanabilir).'),
 ].map((c) => c.toJSON());
 
 async function registerCommands(guildId) {
